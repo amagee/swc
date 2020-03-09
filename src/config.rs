@@ -45,7 +45,7 @@ pub struct ParseOptions {
     pub target: JscTarget,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Options {
     #[serde(flatten, default)]
@@ -98,7 +98,7 @@ fn default_is_module() -> bool {
     true
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SourceMapsConfig {
     Bool(bool),
@@ -111,7 +111,7 @@ impl Default for SourceMapsConfig {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum InputSourceMap {
     Bool(bool),
@@ -235,7 +235,7 @@ impl Options {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RootMode {
     #[serde(rename = "root")]
     Root,
@@ -254,7 +254,7 @@ const fn default_swcrc() -> bool {
     true
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ConfigFile {
     Bool(bool),
@@ -267,7 +267,7 @@ impl Default for ConfigFile {
     }
 }
 
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CallerOptions {
     pub name: String,
@@ -423,6 +423,7 @@ impl Config {
 }
 
 /// One `BuiltConfig` per a directory with swcrc
+#[derive(Debug)]
 pub struct BuiltConfig<P: Pass> {
     pub pass: P,
     pub syntax: Syntax,

@@ -15,6 +15,7 @@ use swc_atoms::{js_word, JsWord};
 use swc_common::{iter::IdentifyLast, FileName, Fold, FoldWith, Spanned, DUMMY_SP};
 use swc_ecma_ast::*;
 use swc_ecma_parser::{Parser, SourceFileInput, Syntax};
+use string_cache::Atom;
 
 #[cfg(test)]
 mod tests;
@@ -118,19 +119,23 @@ impl Jsx {
     fn jsx_frag_to_expr(&mut self, el: JSXFragment) -> Expr {
         let span = el.span();
 
+        let args = iter::once(self.pragma_frag.clone())
+          // attribute: null
+          .chain(iter::once(Lit::Null(Null { span: DUMMY_SP }).as_arg()))
+          .chain({
+              // Children
+              el.children
+                  .into_iter()
+                  .filter_map(|c| self.jsx_elem_child_to_expr(c))
+          })
+          .collect();
+
+        println!("ARGS {:?}", args);
+
         Expr::Call(CallExpr {
             span,
             callee: self.pragma.clone(),
-            args: iter::once(self.pragma_frag.clone())
-                // attribute: null
-                .chain(iter::once(Lit::Null(Null { span: DUMMY_SP }).as_arg()))
-                .chain({
-                    // Children
-                    el.children
-                        .into_iter()
-                        .filter_map(|c| self.jsx_elem_child_to_expr(c))
-                })
-                .collect(),
+            args: args,
             type_args: None,
         })
     }
@@ -140,21 +145,67 @@ impl Jsx {
 
         let name = self.jsx_name(el.opening.name);
 
+        let mut args: Vec<ExprOrSpread> = iter::once(name.as_arg())
+          .chain(iter::once({
+              // Attributes
+              self.fold_attrs(el.opening.attrs).as_arg()
+          }))
+          .chain({
+              // Children
+              el.children
+                  .into_iter()
+                  .filter_map(|c| self.jsx_elem_child_to_expr(c))
+          })
+          .collect();
+
+        match &mut args[1] {
+            ExprOrSpread { 
+                spread: _,
+                expr: box Expr::Object(
+                    ObjectLit {
+                        span: _,
+                        props: p
+                    }
+                )
+            } => {
+                println!("we matched");
+
+                p.push(
+                    PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
+                        key: PropName::Str(Str {
+                            span: DUMMY_SP,
+                            value: Atom::from("123"), //JSWordStaticSet"123".into()),
+                            has_escape: false,
+                        }),
+                        value: Box::new(Expr::Lit(
+                            Lit::Num(
+                                Number {
+                                    span: DUMMY_SP,
+                                    value: 3.0,
+                                },
+                            ),
+                        )),
+                    })))
+                )
+            },
+            _ => println!("we didn't match")
+        }
+
+        args.push(ExprOrSpread {
+            spread: None,
+            //expr: Box::new(Expr::Lit(Lit::Null))
+            expr: Box::new(Expr::Lit(Lit::Bool(Bool {
+                span: DUMMY_SP,
+                value: true,
+            })))
+        });
+
+        println!("ARGS {:#?}", args);
+
         Expr::Call(CallExpr {
             span,
             callee: self.pragma.clone(),
-            args: iter::once(name.as_arg())
-                .chain(iter::once({
-                    // Attributes
-                    self.fold_attrs(el.opening.attrs).as_arg()
-                }))
-                .chain({
-                    // Children
-                    el.children
-                        .into_iter()
-                        .filter_map(|c| self.jsx_elem_child_to_expr(c))
-                })
-                .collect(),
+            args: args,
             type_args: Default::default(),
         })
     }
