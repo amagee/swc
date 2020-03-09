@@ -102,7 +102,7 @@ pub use self::{
     parser::*,
 };
 use serde::{Deserialize, Serialize};
-use swc_common::{errors::Handler, Span};
+use swc_common::{errors::Handler, Span, SpanData};
 
 #[macro_use]
 mod macros;
@@ -128,7 +128,7 @@ impl Default for Syntax {
 }
 
 impl Syntax {
-    /// Should we pare jsx?
+    /// Should we parse jsx?
     pub fn jsx(self) -> bool {
         match self {
             Syntax::Es(EsConfig { jsx: true, .. })
@@ -203,7 +203,8 @@ impl Syntax {
             Syntax::Es(EsConfig {
                 class_private_props: true,
                 ..
-            }) => true,
+            })
+            | Syntax::Typescript(..) => true,
             _ => false,
         }
     }
@@ -254,7 +255,8 @@ impl Syntax {
             Syntax::Es(EsConfig {
                 export_namespace_from: true,
                 ..
-            }) => true,
+            })
+            | Syntax::Typescript(..) => true,
             _ => false,
         }
     }
@@ -328,7 +330,7 @@ pub enum JscTarget {
 
 impl Default for JscTarget {
     fn default() -> Self {
-        JscTarget::Es3
+        JscTarget::Es5
     }
 }
 
@@ -450,4 +452,8 @@ where
 
         f(Session { handler: &handler }, (&*fm).into())
     })
+}
+
+fn make_span(data: SpanData) -> Span {
+    Span::new(data.lo, data.hi, data.ctxt)
 }

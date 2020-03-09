@@ -1,5 +1,9 @@
 use super::{Fold, FoldWith, Visit, VisitWith};
-use crate::util::move_map::MoveMap;
+use crate::{
+    pass::{CompilerPass, Repeated, RepeatedPass},
+    util::move_map::MoveMap,
+};
+use std::borrow::Cow;
 
 #[macro_export]
 macro_rules! chain {
@@ -31,10 +35,6 @@ pub struct AndThen<A, B> {
     pub first: A,
     pub second: B,
 }
-
-// fn type_name<T>() -> String {
-//     format!("{}", unsafe { std::intrinsics::type_name::<T>() })
-// }
 
 impl<T, A, B> Fold<T> for AndThen<A, B>
 where
@@ -88,5 +88,37 @@ where
     fn visit(&mut self, node: &T) {
         self.first.visit(node);
         self.second.visit(node);
+    }
+}
+
+impl<A, B> CompilerPass for AndThen<A, B>
+where
+    A: CompilerPass,
+    B: CompilerPass,
+{
+    fn name() -> Cow<'static, str> {
+        format!("{} -> {}", A::name(), B::name()).into()
+    }
+}
+
+impl<A, B, At> RepeatedPass<At> for AndThen<A, B>
+where
+    A: RepeatedPass<At>,
+    B: RepeatedPass<At>,
+{
+}
+
+impl<A, B> Repeated for AndThen<A, B>
+where
+    A: Repeated,
+    B: Repeated,
+{
+    fn changed(&self) -> bool {
+        self.first.changed() || self.second.changed()
+    }
+
+    fn reset(&mut self) {
+        self.first.reset();
+        self.second.reset();
     }
 }

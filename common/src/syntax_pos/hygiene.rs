@@ -137,6 +137,12 @@ pub(crate) struct HygieneData {
     markings: HashMap<(SyntaxContext, Mark), SyntaxContext>,
 }
 
+impl Default for HygieneData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HygieneData {
     pub(crate) fn new() -> Self {
         HygieneData {

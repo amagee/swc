@@ -19,6 +19,7 @@ mod analyze_source_file;
 pub mod hygiene;
 mod span_encoding;
 
+#[derive(Default)]
 pub struct Globals {
     span_interner: Lock<span_encoding::SpanInterner>,
     hygiene_data: Lock<hygiene::HygieneData>,
@@ -920,6 +921,13 @@ pub struct LineInfo {
 
     /// Column in line where span ends, starting from 0, exclusive.
     pub end_col: CharPos,
+}
+
+/// Used to create a `.map` file.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct LineCol {
+    pub line: u32,
+    pub col: u32,
 }
 
 pub struct FileLines {

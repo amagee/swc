@@ -3,13 +3,13 @@
 
 extern crate test;
 
-use sourcemap::SourceMapBuilder;
+use std::hint::black_box;
 use swc_common::FileName;
 use swc_ecma_codegen::{self, Emitter};
 use swc_ecma_parser::{Parser, Session, SourceFileInput, Syntax};
 use test::Bencher;
 
-const SOURCE: &str = r#"
+const COLORS_JS: &str = r#"
 'use strict';
 /**
  * Extract red color out of a color integer:
@@ -81,19 +81,22 @@ module.exports = {
 };
 "#;
 
-#[bench]
-fn emit_colors(b: &mut Bencher) {
-    b.bytes = SOURCE.len() as _;
+const LARGE_PARTIAL_JS: &str = include_str!("large-partial.js");
+
+fn bench_emitter(b: &mut Bencher, s: &str) {
+    b.bytes = s.len() as _;
 
     let _ = ::testing::run_test(true, |cm, handler| {
         let session = Session { handler: &handler };
-        let fm = cm.new_source_file(FileName::Anon, SOURCE.into());
+
+        let fm = cm.new_source_file(FileName::Anon, s.into());
         let mut parser = Parser::new(
             session,
             Syntax::default(),
             SourceFileInput::from(&*fm),
             None,
         );
+        let mut src_map_buf = vec![];
         let module = parser
             .parse_module()
             .map_err(|mut e| {
@@ -102,8 +105,7 @@ fn emit_colors(b: &mut Bencher) {
             .unwrap();
 
         b.iter(|| {
-            let buf = vec![];
-            let mut src_map_builder = SourceMapBuilder::new(None);
+            let mut buf = vec![];
             {
                 let handlers = box MyHandlers;
                 let mut emitter = Emitter {
@@ -115,17 +117,30 @@ fn emit_colors(b: &mut Bencher) {
                     wr: box swc_ecma_codegen::text_writer::JsWriter::new(
                         cm.clone(),
                         "\n",
-                        buf,
-                        Some(&mut src_map_builder),
+                        &mut buf,
+                        Some(&mut src_map_buf),
                     ),
                     handlers,
                 };
 
-                emitter.emit_module(&module)
+                let _ = emitter.emit_module(&module);
             }
+            black_box(buf);
+            let srcmap = cm.build_source_map(&mut src_map_buf);
+            black_box(srcmap);
         });
         Ok(())
     });
+}
+
+#[bench]
+fn emit_colors(b: &mut Bencher) {
+    bench_emitter(b, COLORS_JS)
+}
+
+#[bench]
+fn emit_large(b: &mut Bencher) {
+    bench_emitter(b, LARGE_PARTIAL_JS)
 }
 
 struct MyHandlers;

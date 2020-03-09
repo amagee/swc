@@ -2,12 +2,11 @@ use crate::{
     pass::Pass,
     util::{prepend_stmts, var::VarCollector, ExprFactory},
 };
-use hashbrown::HashMap;
-use swc_atoms::{js_word, JsWord};
-use swc_common::{
-    util::move_map::MoveMap, Fold, FoldWith, Spanned, SyntaxContext, Visit, VisitWith, DUMMY_SP,
-};
+use fxhash::FxHashMap;
+use swc_atoms::js_word;
+use swc_common::{util::move_map::MoveMap, Fold, FoldWith, Spanned, Visit, VisitWith, DUMMY_SP};
 use swc_ecma_ast::*;
+use swc_ecma_utils::{ident::IdentLike, Id};
 
 /// Strips type annotations out.
 pub fn strip() -> impl Pass {
@@ -19,6 +18,8 @@ struct Strip {
     non_top_level: bool,
     scope: Scope,
     phase: Phase,
+
+    was_side_effect_import: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -39,8 +40,8 @@ impl Default for Phase {
 
 #[derive(Default)]
 struct Scope {
-    decls: HashMap<(JsWord, SyntaxContext), DeclInfo>,
-    imported_idents: HashMap<(JsWord, SyntaxContext), DeclInfo>,
+    decls: FxHashMap<Id, DeclInfo>,
+    imported_idents: FxHashMap<Id, DeclInfo>,
 }
 
 #[derive(Debug, Default)]
@@ -198,17 +199,35 @@ impl Fold<Vec<Pat>> for Strip {
 
 impl Fold<Vec<ModuleItem>> for Strip {
     fn fold(&mut self, items: Vec<ModuleItem>) -> Vec<ModuleItem> {
+        let old = self.phase;
+
         // First pass
+        self.phase = Phase::Analysis;
         let items = items.fold_children(self);
 
-        let old = self.phase;
         self.phase = Phase::DropImports;
 
         // Second pass
         let mut stmts = Vec::with_capacity(items.len());
         for item in items {
+            self.was_side_effect_import = false;
             match item {
-                ModuleItem::Stmt(Stmt::Empty(..)) => continue,
+                ModuleItem::Stmt(Stmt::Empty(..))
+                | ModuleItem::ModuleDecl(ModuleDecl::Import(ImportDecl {
+                    type_only: true, ..
+                }))
+                | ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(NamedExport {
+                    type_only: true,
+                    ..
+                })) => continue,
+
+                ModuleItem::ModuleDecl(ModuleDecl::Import(i)) => {
+                    let i = i.fold_with(self);
+
+                    if self.was_side_effect_import || !i.specifiers.is_empty() {
+                        stmts.push(ModuleItem::ModuleDecl(ModuleDecl::Import(i)));
+                    }
+                }
 
                 ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
                     decl: Decl::TsEnum(e),
@@ -253,6 +272,25 @@ impl Fold<Vec<ModuleItem>> for Strip {
                     self.handle_enum(e, &mut stmts)
                 }
 
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(ExportDefaultExpr {
+                    expr: box Expr::Ident(ref i),
+                    ..
+                })) => {
+                    // type MyType = string;
+                    // export default MyType;
+
+                    let preserve = if let Some(decl_info) = self.scope.decls.get(&i.to_id()) {
+                        decl_info.has_concrete
+                    } else {
+                        true
+                    };
+
+                    if preserve {
+                        stmts.push(item)
+                    }
+                }
+
+                // Strip out ts-only extensions
                 ModuleItem::Stmt(Stmt::Decl(Decl::Fn(FnDecl {
                     function: Function { body: None, .. },
                     ..
@@ -387,6 +425,26 @@ impl Strip {
                                             has_escape: false,
                                         },
                                     };
+                                    let prop = if let Some(init) = &m.init {
+                                        init.clone()
+                                    } else {
+                                        box Expr::Assign(AssignExpr {
+                                            span: DUMMY_SP,
+                                            left: PatOrExpr::Expr(box Expr::Member(MemberExpr {
+                                                span: DUMMY_SP,
+                                                obj: id.clone().as_obj(),
+                                                prop: m.init.unwrap_or_else(|| {
+                                                    box Expr::Lit(Lit::Str(value.clone()))
+                                                }),
+                                                computed: true,
+                                            })),
+                                            op: op!("="),
+                                            right: box Expr::Lit(Lit::Num(Number {
+                                                span: DUMMY_SP,
+                                                value: i as _,
+                                            })),
+                                        })
+                                    };
 
                                     // Foo[Foo["a"] = 0] = "a";
                                     AssignExpr {
@@ -397,24 +455,7 @@ impl Strip {
                                             computed: true,
 
                                             // Foo["a"] = 0
-                                            prop: box Expr::Assign(AssignExpr {
-                                                span: DUMMY_SP,
-                                                left: PatOrExpr::Expr(box Expr::Member(
-                                                    MemberExpr {
-                                                        span: DUMMY_SP,
-                                                        obj: id.clone().as_obj(),
-                                                        prop: m.init.unwrap_or_else(|| {
-                                                            box Expr::Lit(Lit::Str(value.clone()))
-                                                        }),
-                                                        computed: true,
-                                                    },
-                                                )),
-                                                op: op!("="),
-                                                right: box Expr::Lit(Lit::Num(Number {
-                                                    span: DUMMY_SP,
-                                                    value: i as _,
-                                                })),
-                                            }),
+                                            prop,
                                         })),
                                         op: op!("="),
                                         right: box Expr::Lit(Lit::Str(Str {
@@ -476,6 +517,8 @@ impl Fold<ImportDecl> for Strip {
                 import
             }
             Phase::DropImports => {
+                self.was_side_effect_import = import.specifiers.is_empty();
+
                 import.specifiers.retain(|s| match *s {
                     ImportSpecifier::Default(ImportDefault { ref local, .. })
                     | ImportSpecifier::Specific(ImportSpecific { ref local, .. }) => {
@@ -611,6 +654,7 @@ impl Fold<Expr> for Strip {
             Expr::TsAs(TsAsExpr { expr, .. }) => validate!(*expr),
             Expr::TsNonNull(TsNonNullExpr { expr, .. }) => validate!(*expr),
             Expr::TsTypeAssertion(TsTypeAssertion { expr, .. }) => validate!(*expr),
+            Expr::TsConstAssertion(TsConstAssertion { expr, .. }) => validate!(*expr),
             Expr::TsTypeCast(TsTypeCastExpr { expr, .. }) => validate!(*expr),
             _ => validate!(expr),
         }

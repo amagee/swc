@@ -11,6 +11,8 @@ pub fn export() -> impl Pass {
 #[derive(Clone)]
 struct ExportDefaultFrom;
 
+noop_fold_type!(ExportDefaultFrom);
+
 impl Fold<Vec<ModuleItem>> for ExportDefaultFrom {
     fn fold(&mut self, items: Vec<ModuleItem>) -> Vec<ModuleItem> {
         // Imports
@@ -44,6 +46,7 @@ impl Fold<Vec<ModuleItem>> for ExportDefaultFrom {
                                     .src
                                     .clone()
                                     .expect("`export default from` requires source"),
+                                type_only: false,
                             })));
                             extra_stmts.push(ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(
                                 NamedExport {
@@ -56,6 +59,7 @@ impl Fold<Vec<ModuleItem>> for ExportDefaultFrom {
                                         },
                                     )],
                                     src: None,
+                                    type_only: false,
                                 },
                             )));
                         }
@@ -72,6 +76,7 @@ impl Fold<Vec<ModuleItem>> for ExportDefaultFrom {
                                     .src
                                     .clone()
                                     .expect("`export default from` requires source"),
+                                type_only: false,
                             })));
                             extra_stmts.push(ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(
                                 NamedExport {
@@ -84,6 +89,7 @@ impl Fold<Vec<ModuleItem>> for ExportDefaultFrom {
                                         },
                                     )],
                                     src: None,
+                                    type_only: false,
                                 },
                             )));
                         }

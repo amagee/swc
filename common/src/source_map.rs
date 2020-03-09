@@ -24,12 +24,18 @@ use crate::{
 };
 use hashbrown::HashMap;
 use log::debug;
+use sourcemap::SourceMapBuilder;
 use std::{
-    cmp, env, fs,
+    cmp,
+    cmp::{max, min},
+    env, fs,
     hash::Hash,
     io::{self, Read},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering::SeqCst},
+        Arc,
+    },
 };
 
 // _____________________________________________________________________________
@@ -101,6 +107,7 @@ pub(super) struct SourceMapFiles {
 
 pub struct SourceMap {
     pub(super) files: Lock<SourceMapFiles>,
+    start_pos: AtomicUsize,
     file_loader: Box<dyn FileLoader + Sync + Send>,
     // This is used to apply the file path remapping as specified via
     // --remap-path-prefix to all SourceFiles allocated within this SourceMap.
@@ -120,16 +127,10 @@ impl SourceMap {
     pub fn new(path_mapping: FilePathMapping) -> SourceMap {
         SourceMap {
             files: Default::default(),
+            start_pos: Default::default(),
             file_loader: Box::new(RealFileLoader),
             path_mapping,
             doctest_offset: None,
-        }
-    }
-
-    pub fn new_doctest(path_mapping: FilePathMapping, file: FileName, line: isize) -> SourceMap {
-        SourceMap {
-            doctest_offset: Some((file, line)),
-            ..SourceMap::new(path_mapping)
         }
     }
 
@@ -139,6 +140,7 @@ impl SourceMap {
     ) -> SourceMap {
         SourceMap {
             files: Default::default(),
+            start_pos: Default::default(),
             file_loader,
             path_mapping,
             doctest_offset: None,
@@ -155,11 +157,7 @@ impl SourceMap {
 
     pub fn load_file(&self, path: &Path) -> io::Result<Arc<SourceFile>> {
         let src = self.file_loader.read_file(path)?;
-        let filename = if let Some((ref name, _)) = self.doctest_offset {
-            name.clone()
-        } else {
-            path.to_owned().into()
-        };
+        let filename = path.to_owned().into();
         Ok(self.new_source_file(filename, src))
     }
 
@@ -178,19 +176,19 @@ impl SourceMap {
             .cloned()
     }
 
-    fn next_start_pos(&self) -> usize {
+    fn next_start_pos(&self, len: usize) -> usize {
         match self.files.borrow().source_files.last() {
-            None => 0,
+            None => self.start_pos.fetch_add(len + 1, SeqCst),
             // Add one so there is some space between files. This lets us distinguish
             // positions in the source_map, even in the presence of zero-length files.
-            Some(last) => last.end_pos.to_usize() + 1,
+            Some(..) => self.start_pos.fetch_add(len + 1, SeqCst),
         }
     }
 
     /// Creates a new source_file.
     /// This does not ensure that only one SourceFile exists per file name.
     pub fn new_source_file(&self, filename: FileName, src: String) -> Arc<SourceFile> {
-        let start_pos = self.next_start_pos();
+        let start_pos = self.next_start_pos(src.len());
 
         // The path is used to determine the directory for loading submodules and
         // include files, so it must be before remapping.
@@ -214,12 +212,14 @@ impl SourceMap {
             Pos::from_usize(start_pos),
         ));
 
-        let mut files = self.files.borrow_mut();
+        {
+            let mut files = self.files.borrow_mut();
 
-        files.source_files.push(source_file.clone());
-        files
-            .stable_id_to_source_file
-            .insert(StableSourceFileId::new(&source_file), source_file.clone());
+            files.source_files.push(source_file.clone());
+            files
+                .stable_id_to_source_file
+                .insert(StableSourceFileId::new(&source_file), source_file.clone());
+        }
 
         source_file
     }
@@ -248,13 +248,35 @@ impl SourceMap {
 
     /// Lookup source information about a BytePos
     pub fn lookup_char_pos(&self, pos: BytePos) -> Loc {
-        let chpos = self.bytepos_to_file_charpos(pos);
-        match self.lookup_line(pos) {
+        let fm = self.lookup_source_file(pos);
+        self.lookup_char_pos_with(fm, pos)
+    }
+
+    /// Lookup source information about a BytePos
+    ///
+    ///
+    /// This method exists only for optimization and it's not part of public
+    /// api.
+    #[doc(hidden)]
+    pub fn lookup_char_pos_with(&self, fm: Arc<SourceFile>, pos: BytePos) -> Loc {
+        let line_info = self.lookup_line_with(fm, pos);
+        match line_info {
             Ok(SourceFileAndLine { sf: f, line: a }) => {
+                let chpos = self.bytepos_to_file_charpos_with(&f, pos);
+
                 let line = a + 1; // Line numbers start at 1
                 let linebpos = f.lines[a];
-                let linechpos = self.bytepos_to_file_charpos(linebpos);
-                let col = chpos - linechpos;
+                assert!(
+                    pos >= linebpos,
+                    "{}: bpos = {:?}; linebpos = {:?};",
+                    f.name,
+                    pos,
+                    linebpos,
+                );
+
+                let linechpos = self.bytepos_to_file_charpos_with(&f, linebpos);
+
+                let col = max(chpos, linechpos) - min(chpos, linechpos);
 
                 let col_display = {
                     let start_width_idx = f
@@ -281,7 +303,7 @@ impl SourceMap {
                     chpos, linechpos
                 );
                 debug!("byte is on line: {}", line);
-                assert!(chpos >= linechpos);
+                //                assert!(chpos >= linechpos);
                 Loc {
                     file: f,
                     line,
@@ -290,6 +312,8 @@ impl SourceMap {
                 }
             }
             Err(f) => {
+                let chpos = self.bytepos_to_file_charpos(pos);
+
                 let col_display = {
                     let end_width_idx = f
                         .non_narrow_chars
@@ -311,12 +335,23 @@ impl SourceMap {
         }
     }
 
-    // If the relevant source_file is empty, we don't return a line number.
+    /// If the relevant source_file is empty, we don't return a line number.
     pub fn lookup_line(&self, pos: BytePos) -> Result<SourceFileAndLine, Arc<SourceFile>> {
-        let idx = self.lookup_source_file_idx(pos);
+        let f = self.lookup_source_file(pos);
 
-        let f = (*self.files.borrow().source_files)[idx].clone();
+        self.lookup_line_with(f, pos)
+    }
 
+    /// If the relevant source_file is empty, we don't return a line number.
+    ///
+    /// This method exists only for optimization and it's not part of public
+    /// api.
+    #[doc(hidden)]
+    pub fn lookup_line_with(
+        &self,
+        f: Arc<SourceFile>,
+        pos: BytePos,
+    ) -> Result<SourceFileAndLine, Arc<SourceFile>> {
         match f.lookup_line(pos) {
             Some(line) => Ok(SourceFileAndLine { sf: f, line }),
             None => Err(f),
@@ -774,21 +809,36 @@ impl SourceMap {
     /// For a global BytePos compute the local offset within the containing
     /// SourceFile
     pub fn lookup_byte_offset(&self, bpos: BytePos) -> SourceFileAndBytePos {
-        let idx = self.lookup_source_file_idx(bpos);
-        let sf = (*self.files.borrow().source_files)[idx].clone();
+        let sf = self.lookup_source_file(bpos);
         let offset = bpos - sf.start_pos;
         SourceFileAndBytePos { sf, pos: offset }
     }
 
     /// Converts an absolute BytePos to a CharPos relative to the source_file.
-    pub fn bytepos_to_file_charpos(&self, bpos: BytePos) -> CharPos {
-        let idx = self.lookup_source_file_idx(bpos);
-        let map = &(*self.files.borrow().source_files)[idx];
+    fn bytepos_to_file_charpos(&self, bpos: BytePos) -> CharPos {
+        let map = self.lookup_source_file(bpos);
 
+        self.bytepos_to_file_charpos_with(&map, bpos)
+    }
+
+    fn bytepos_to_file_charpos_with(&self, map: &SourceFile, bpos: BytePos) -> CharPos {
+        let total_extra_bytes = self.calc_extra_bytes(map, &mut 0, bpos);
+        assert!(
+            map.start_pos.to_u32() + total_extra_bytes <= bpos.to_u32(),
+            "map.start_pos = {:?}; total_extra_bytes = {}; bpos = {:?}",
+            map.start_pos,
+            total_extra_bytes,
+            bpos,
+        );
+        CharPos(bpos.to_usize() - map.start_pos.to_usize() - total_extra_bytes as usize)
+    }
+
+    /// Converts an absolute BytePos to a CharPos relative to the source_file.
+    fn calc_extra_bytes(&self, map: &SourceFile, start: &mut usize, bpos: BytePos) -> u32 {
         // The number of extra bytes due to multibyte chars in the SourceFile
         let mut total_extra_bytes = 0;
 
-        for mbc in map.multibyte_chars.iter() {
+        for (i, &mbc) in map.multibyte_chars[*start..].iter().enumerate() {
             debug!("{}-byte char at {:?}", mbc.bytes, mbc.pos);
             if mbc.pos < bpos {
                 // every character is at least one byte, so we only
@@ -796,20 +846,25 @@ impl SourceMap {
                 total_extra_bytes += mbc.bytes as u32 - 1;
                 // We should never see a byte position in the middle of a
                 // character
-                assert!(bpos.to_u32() >= mbc.pos.to_u32() + mbc.bytes as u32);
+                debug_assert!(bpos.to_u32() >= mbc.pos.to_u32() + mbc.bytes as u32);
             } else {
+                *start += i;
                 break;
             }
         }
 
-        assert!(map.start_pos.to_u32() + total_extra_bytes <= bpos.to_u32());
-        CharPos(bpos.to_usize() - map.start_pos.to_usize() - total_extra_bytes as usize)
+        total_extra_bytes
     }
 
-    // Return the index of the source_file (in self.files) which contains pos.
-    pub fn lookup_source_file_idx(&self, pos: BytePos) -> usize {
-        let files = self.files.borrow();
-        let files = &files.source_files;
+    /// Return the index of the source_file (in self.files) which contains pos.
+    ///
+    /// This method exists only for optimization and it's not part of public
+    /// api.
+    #[doc(hidden)]
+    pub fn lookup_source_file_in(
+        files: &[Arc<SourceFile>],
+        pos: BytePos,
+    ) -> Option<Arc<SourceFile>> {
         let count = files.len();
 
         // Binary search for the source_file.
@@ -824,13 +879,30 @@ impl SourceMap {
             }
         }
 
-        assert!(
-            a < count,
-            "position {} does not resolve to a source location",
-            pos.to_usize()
-        );
+        if a >= count {
+            return None;
+        }
 
-        a
+        Some(files[a].clone())
+    }
+
+    /// Return the index of the source_file (in self.files) which contains pos.
+    ///
+    /// This is not a public api.
+    #[doc(hidden)]
+    pub fn lookup_source_file(&self, pos: BytePos) -> Arc<SourceFile> {
+        let files = self.files.borrow();
+        let files = &files.source_files;
+        let fm = Self::lookup_source_file_in(&files, pos);
+        match fm {
+            Some(fm) => fm,
+            None => {
+                panic!(
+                    "position {} does not resolve to a source location",
+                    pos.to_usize()
+                );
+            }
+        }
     }
 
     pub fn count_lines(&self) -> usize {
@@ -920,6 +992,67 @@ impl SourceMap {
         }
 
         None
+    }
+
+    /// Creates a `.map` file.
+    pub fn build_source_map(&self, mappings: &mut Vec<(BytePos, LineCol)>) -> sourcemap::SourceMap {
+        let mut builder = SourceMapBuilder::new(None);
+
+        // // This method is optimized based on the fact that mapping is sorted.
+        // mappings.sort_by_key(|v| v.0);
+
+        let mut cur_file: Option<Arc<SourceFile>> = None;
+        // let mut src_id = None;
+
+        let mut ch_start = 0;
+        let mut line_ch_start = 0;
+
+        for (pos, lc) in mappings.iter() {
+            let pos = *pos;
+            let lc = *lc;
+
+            // TODO: Use correct algorithm
+            if pos >= BytePos(4294967295) {
+                continue;
+            }
+
+            let f;
+            let f = match cur_file {
+                Some(ref f) if f.start_pos <= pos && pos < f.end_pos => f,
+                _ => {
+                    f = self.lookup_source_file(pos);
+                    builder.add_source(&f.src);
+                    cur_file = Some(f.clone());
+                    ch_start = 0;
+                    line_ch_start = 0;
+                    // src_id = Some(builder.add_source(&f.src));
+                    &f
+                }
+            };
+
+            let a = match f.lookup_line(pos) {
+                Some(line) => line,
+                None => continue,
+            };
+
+            let line = a + 1; // Line numbers start at 1
+            let linebpos = f.lines[a];
+            debug_assert!(
+                pos >= linebpos,
+                "{}: bpos = {:?}; linebpos = {:?};",
+                f.name,
+                pos,
+                linebpos,
+            );
+            let chpos = { self.calc_extra_bytes(&f, &mut ch_start, pos) };
+            let linechpos = { self.calc_extra_bytes(&f, &mut line_ch_start, linebpos) };
+
+            let col = max(chpos, linechpos) - min(chpos, linechpos);
+
+            builder.add(lc.line, lc.col, (line - 1) as _, col as _, None, None);
+        }
+
+        builder.into_sourcemap()
     }
 }
 

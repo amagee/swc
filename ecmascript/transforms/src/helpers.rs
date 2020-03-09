@@ -224,6 +224,9 @@ define_helpers!(Helpers {
 
 #[derive(Clone)]
 pub struct InjectHelpers;
+
+noop_fold_type!(InjectHelpers);
+
 impl InjectHelpers {
     fn mk_helpers(&self) -> Vec<ModuleItem> {
         let (mark, external) = HELPERS.with(|helper| (helper.mark(), helper.external()));
@@ -236,6 +239,7 @@ impl InjectHelpers {
                         local: quote_ident!(DUMMY_SP.apply_mark(mark), "swcHelpers"),
                     })],
                     src: quote_str!("@swc/helpers"),
+                    type_only: false,
                 }))]
             } else {
                 vec![]
@@ -257,6 +261,9 @@ impl Fold<Module> for InjectHelpers {
 }
 
 struct Marker(Mark);
+
+noop_fold_type!(Marker);
+
 impl Fold<Span> for Marker {
     fn fold(&mut self, sp: Span) -> Span {
         sp.apply_mark(self.0)

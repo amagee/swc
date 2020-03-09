@@ -1,10 +1,11 @@
 use crate::{pass::Pass, util::undefined};
 use smallvec::SmallVec;
-use std::mem::replace;
+use std::{iter::once, mem::replace};
 use swc_common::{util::map::Map, Fold, FoldWith, Spanned, Visit, VisitWith, DUMMY_SP};
 use swc_ecma_ast::*;
 use swc_ecma_utils::{
-    find_ids, ident::IdentLike, prepend, var::VarCollector, ExprFactory, Id, StmtLike,
+    contains_this_expr, find_ids, ident::IdentLike, prepend, var::VarCollector, ExprFactory, Id,
+    StmtLike,
 };
 
 ///
@@ -21,7 +22,11 @@ use swc_ecma_utils::{
 /// }
 /// ```
 pub fn block_scoping() -> impl Pass {
-    BlockScoping::default()
+    BlockScoping {
+        scope: Default::default(),
+        vars: vec![],
+        var_decl_kind: VarDeclKind::Var,
+    }
 }
 
 type ScopeStack = SmallVec<[ScopeKind; 8]>;
@@ -39,11 +44,13 @@ enum ScopeKind {
     Block,
 }
 
-#[derive(Default)]
 struct BlockScoping {
     scope: ScopeStack,
     vars: Vec<VarDeclarator>,
+    var_decl_kind: VarDeclKind,
 }
+
+noop_fold_type!(BlockScoping);
 
 impl BlockScoping {
     /// This methods remove [ScopeKind::Loop] and [ScopeKind::Fn], but not
@@ -97,6 +104,14 @@ impl BlockScoping {
 
     fn handle_vars(&mut self, body: Box<Stmt>) -> Box<Stmt> {
         body.map(|body| {
+            {
+                let mut v = FunctionFinder { found: false };
+                body.visit_with(&mut v);
+                if !v.found {
+                    return body;
+                }
+            }
+
             //
             if let Some(ScopeKind::ForLetLoop { args, used, .. }) = self.scope.pop() {
                 if used.is_empty() {
@@ -104,6 +119,7 @@ impl BlockScoping {
                 }
 
                 let var_name = private_ident!("_loop");
+                let uses_this = contains_this_expr(&body);
 
                 self.vars.push(VarDeclarator {
                     span: DUMMY_SP,
@@ -120,9 +136,9 @@ impl BlockScoping {
                                     })
                                     .collect(),
                                 decorators: Default::default(),
-                                body: Some(match body {
+                                body: Some(match body.fold_with(&mut FlowHelper) {
                                     Stmt::Block(bs) => bs,
-                                    _ => BlockStmt {
+                                    body => BlockStmt {
                                         span: DUMMY_SP,
                                         stmts: vec![body],
                                     },
@@ -138,19 +154,37 @@ impl BlockScoping {
                     definite: false,
                 });
 
-                return CallExpr {
-                    span: DUMMY_SP,
-                    callee: var_name.as_callee(),
-                    args: args
-                        .into_iter()
-                        .map(|i| ExprOrSpread {
+                return if uses_this {
+                    CallExpr {
+                        span: DUMMY_SP,
+                        callee: var_name.member(quote_ident!("call")).as_callee(),
+                        args: once(ExprOrSpread {
+                            spread: None,
+                            expr: box Expr::This(ThisExpr { span: DUMMY_SP }),
+                        })
+                        .chain(args.into_iter().map(|i| ExprOrSpread {
                             spread: None,
                             expr: box Expr::Ident(Ident::new(i.0, DUMMY_SP.with_ctxt(i.1))),
-                        })
+                        }))
                         .collect(),
-                    type_args: None,
-                }
-                .into_stmt();
+                        type_args: None,
+                    }
+                    .into_stmt()
+                } else {
+                    CallExpr {
+                        span: DUMMY_SP,
+                        callee: var_name.as_callee(),
+                        args: args
+                            .into_iter()
+                            .map(|i| ExprOrSpread {
+                                spread: None,
+                                expr: box Expr::Ident(Ident::new(i.0, DUMMY_SP.with_ctxt(i.1))),
+                            })
+                            .collect(),
+                        type_args: None,
+                    }
+                    .into_stmt()
+                };
             }
 
             body
@@ -181,6 +215,7 @@ impl Fold<WhileStmt> for BlockScoping {
 impl Fold<ForStmt> for BlockScoping {
     fn fold(&mut self, node: ForStmt) -> ForStmt {
         let init = node.init.fold_with(self);
+
         let mut vars = find_vars(&init);
         let args = vars.clone();
 
@@ -328,7 +363,11 @@ impl Fold<SetterProp> for BlockScoping {
 
 impl Fold<VarDecl> for BlockScoping {
     fn fold(&mut self, var: VarDecl) -> VarDecl {
+        let old = self.var_decl_kind;
+        self.var_decl_kind = var.kind;
         let var = var.fold_children(self);
+
+        self.var_decl_kind = old;
 
         VarDecl {
             kind: VarDeclKind::Var,
@@ -342,7 +381,11 @@ impl Fold<VarDeclarator> for BlockScoping {
         let var = var.fold_children(self);
 
         let init = if self.in_loop_body() && var.init.is_none() {
-            Some(undefined(var.span()))
+            if self.var_decl_kind == VarDeclKind::Var {
+                None
+            } else {
+                Some(undefined(var.span()))
+            }
         } else {
             var.init
         };
@@ -417,6 +460,8 @@ struct InfectionFinder<'a> {
     found: bool,
 }
 
+noop_visit_type!(InfectionFinder<'_>);
+
 impl Visit<VarDeclarator> for InfectionFinder<'_> {
     fn visit(&mut self, node: &VarDeclarator) {
         let old = self.found;
@@ -475,6 +520,35 @@ impl Visit<Ident> for InfectionFinder<'_> {
                 break;
             }
         }
+    }
+}
+
+#[derive(Debug)]
+struct FlowHelper;
+
+noop_fold_type!(FlowHelper);
+
+impl Fold<Stmt> for FlowHelper {
+    fn fold(&mut self, node: Stmt) -> Stmt {
+        let span = node.span();
+
+        match node {
+            Stmt::Continue(..) => return Stmt::Return(ReturnStmt { span, arg: None }),
+            _ => node.fold_children(self),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FunctionFinder {
+    found: bool,
+}
+
+noop_visit_type!(FunctionFinder);
+
+impl Visit<Function> for FunctionFinder {
+    fn visit(&mut self, _: &Function) {
+        self.found = true
     }
 }
 
@@ -588,5 +662,215 @@ for (let i of [1, 3, 5, 7, 9]) {
 expect(functions[0]()).toBe(1);
 expect(functions[1]()).toBe(3);
 "
+    );
+
+    test!(
+        ::swc_ecma_parser::Syntax::default(),
+        |_| block_scoping(),
+        issue_662,
+        "function foo(parts) {
+  let match = null;
+
+  for (let i = 1; i >= 0; i--) {
+    for (let j = 0; j >= 0; j--) {
+      match = parts[i][j];
+
+      if (match) {
+        break;
+      }
+    }
+
+    if (match) {
+      break;
+    }
+  }
+
+  return match;
+}
+
+foo();",
+        "function foo(parts) {
+  var match = null;
+
+  for (var i = 1; i >= 0; i--) {
+    for (var j = 0; j >= 0; j--) {
+      match = parts[i][j];
+
+      if (match) {
+        break;
+      }
+    }
+
+    if (match) {
+      break;
+    }
+  }
+
+  return match;
+}
+
+foo();"
+    );
+
+    test!(
+        ::swc_ecma_parser::Syntax::default(),
+        |_| block_scoping(),
+        issue_686,
+        "module.exports = function(values) {
+    var vars = [];
+    var elem = null, name, val;
+    for (var i = 0; i < this.elements.length; i++) {
+      elem = this.elements[i];
+      name = elem.name;
+      if (!name) continue;
+      val = values[name];
+      if (val == null) val = '';
+      switch (elem.type) {
+      case 'submit':
+        break;
+      case 'radio':
+      case 'checkbox':
+        elem.checked = val.some(function(str) {
+          return str.toString() == elem.value;
+        });
+        break;
+      case 'select-multiple':
+        elem.fill(val);
+        break;
+      case 'textarea':
+        elem.innerText = val;
+        break;
+      case 'hidden':
+        break;
+      default:
+        if (elem.fill) {
+          elem.fill(val);
+        } else {
+          elem.value = val;
+        }
+        break;
+      }
+    }
+    return vars;
+  };",
+        "module.exports = function(values) {
+    var _loop = function(i) {
+        elem = this.elements[i];
+        name = elem.name;
+        if (!name) return;
+        val = values[name];
+        if (val == null) val = '';
+        switch(elem.type){
+            case 'submit': break;
+            case 'radio':
+            case 'checkbox':
+                elem.checked = val.some(function(str) {
+                    return str.toString() == elem.value;
+                });
+                break;
+            case 'select-multiple':
+                elem.fill(val);
+                break;
+            case 'textarea':
+                elem.innerText = val;
+                break;
+            case 'hidden': break;
+            default:
+                if (elem.fill) {
+                    elem.fill(val);
+                } else {
+                    elem.value = val;
+                }
+                break;
+        }
+    };
+    var vars = [];
+    var elem = null, name, val;
+    for(var i = 0; i < this.elements.length; i++)_loop.call(this, i);
+    return vars;
+};"
+    );
+
+    test!(
+        ::swc_ecma_parser::Syntax::default(),
+        |_| block_scoping(),
+        issue_698,
+        "module.exports = function(values) {
+    var vars = [];
+    var elem = null, name, val;
+    for (var i = 0; i < this.elements.length; i++) {
+      elem = this.elements[i];
+      name = elem.name;
+      if (!name) continue;
+      val = values[name];
+      if (val == null) val = '';
+      switch (elem.type) {
+      case 'submit':
+        break;
+      case 'radio':
+      case 'checkbox':
+        elem.checked = val.some(function(str) {
+          return str.toString() == elem.value;
+        });
+        break;
+      case 'select-multiple':
+        elem.fill(val);
+        break;
+      case 'textarea':
+        elem.innerText = val;
+        break;
+      case 'hidden':
+        break;
+      default:
+        if (elem.fill) {
+          elem.fill(val);
+        } else {
+          elem.value = val;
+        }
+        break;
+      }
+    }
+    return vars;
+  };
+
+",
+        "module.exports = function(values) {
+    var _loop = function(i) {
+        elem = this.elements[i];
+        name = elem.name;
+        if (!name) return;
+        val = values[name];
+        if (val == null) val = '';
+        switch(elem.type){
+            case 'submit':
+                break;
+            case 'radio':
+            case 'checkbox':
+                elem.checked = val.some(function(str) {
+                    return str.toString() == elem.value;
+                });
+                break;
+            case 'select-multiple':
+                elem.fill(val);
+                break;
+            case 'textarea':
+                elem.innerText = val;
+                break;
+            case 'hidden':
+                break;
+            default:
+                if (elem.fill) {
+                    elem.fill(val);
+                } else {
+                    elem.value = val;
+                }
+                break;
+        }
+    };
+    var vars = [];
+    var elem = null, name, val;
+    for(var i = 0; i < this.elements.length; i++)_loop.call(this, i);
+    return vars;
+};"
     );
 }

@@ -1,5 +1,8 @@
 use std::marker::PhantomData;
-use swc_common::{Fold, FoldWith};
+use swc_common::{
+    pass::{Repeated, RepeatedPass},
+    Fold, FoldWith,
+};
 use swc_ecma_ast::*;
 
 pub fn noop() -> impl Pass {
@@ -179,10 +182,6 @@ pub struct JoinedPass<A, B, N> {
     pub ty: PhantomData<N>,
 }
 
-// fn type_name<T>() -> String {
-//     format!("{}", unsafe { std::intrinsics::type_name::<T>() })
-// }
-
 impl<A, B, T> Fold<T> for JoinedPass<A, B, T>
 where
     T: FoldWith<Self>,
@@ -210,3 +209,10 @@ where
         node.fold_children(self)
     }
 }
+
+pub trait RepeatedJsPass:
+    Repeated + RepeatedPass<Program> + RepeatedPass<Module> + RepeatedPass<Script> + Pass
+{
+}
+
+impl<P> RepeatedJsPass for P where P: Repeated + Pass {}

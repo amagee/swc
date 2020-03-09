@@ -1,7 +1,6 @@
 #![allow(unused_macros)]
 #![allow(dead_code)]
 
-use sourcemap::SourceMapBuilder;
 use std::{
     fmt,
     fs::{create_dir_all, remove_dir_all, OpenOptions},
@@ -149,7 +148,6 @@ impl<'a> Tester<'a> {
 
         let mut wr = Buf(Arc::new(RwLock::new(vec![])));
         {
-            let mut src_map_builder = SourceMapBuilder::new(None);
             let mut emitter = Emitter {
                 cfg: Default::default(),
                 cm: self.cm.clone(),
@@ -157,7 +155,7 @@ impl<'a> Tester<'a> {
                     self.cm.clone(),
                     "\n",
                     &mut wr,
-                    Some(&mut src_map_builder),
+                    None,
                 ),
                 comments: None,
                 handlers,
@@ -200,6 +198,7 @@ where
         let expected =
             tester.apply_transform(::testing::DropSpan, "output.js", syntax, expected)?;
 
+        println!(">>>>> Orig <<<<<\n{}", input);
         println!("----- Actual -----");
 
         let tr = make_tr("actual", tr, tester);
@@ -236,7 +235,6 @@ where
             return Err(());
         }
 
-        println!(">>>>> Orig <<<<<\n{}", input);
         println!(">>>>> Code <<<<<\n{}", actual_src);
         if actual_src != expected_src {
             panic!(

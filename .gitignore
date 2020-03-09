@@ -21,3 +21,10 @@ node_modules/
 *.html
 *.svg
 package-lock.json
+*.data
+*.old
+*.stacks
+
+# Coverage datas
+*.zip
+*.info

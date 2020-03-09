@@ -16,7 +16,8 @@ macro_rules! to {
             |_| strip(),
             $name,
             $from,
-            $to
+            $to,
+            ok_if_code_eq
         );
     };
 }
@@ -80,8 +81,7 @@ to!(
     issue_179_01,
     "import {Types} from 'other';
 const a: Types.foo = {};",
-    "import 'other';
-const a = {};"
+    "const a = {};"
 );
 
 to!(
@@ -166,7 +166,6 @@ import { PlainObject } from 'simplytyped';
 const dict: PlainObject = {};
 ",
     "
-import 'simplytyped';
 const dict = {};"
 );
 
@@ -179,7 +178,6 @@ import { PlainObject } from 'simplytyped';
 const dict: PlainObject = {};
 ",
     "
-import 'simplytyped';
 const dict = {};"
 );
 
@@ -282,15 +280,15 @@ test!(
   mounted = 'mounted',
   unmounted = 'unmounted',
 }",
-    "var State;
-(function(State) {
-    State[State['closed'] = 0] = 'closed';
-    State[State['opened'] = 1] = 'opened';
-    State[State['mounted'] = 2] = 'mounted';
-    State[State['unmounted'] = 3] = 'unmounted';
-})(State || (State = {
-}));
-",
+    r#"
+var State;
+(function (State) {
+    State["closed"] = "closed";
+    State["opened"] = "opened";
+    State["mounted"] = "mounted";
+    State["unmounted"] = "unmounted";
+})(State || (State = {}));
+"#,
     ok_if_code_eq
 );
 
@@ -304,13 +302,94 @@ test!(
   mounted = 'mounted',
   unmounted = 'unmounted',
 }",
-    "export var State;
-(function(State) {
-    State[State['closed'] = 0] = 'closed';
-    State[State['opened'] = 1] = 'opened';
-    State[State['mounted'] = 2] = 'mounted';
-    State[State['unmounted'] = 3] = 'unmounted';
-})(State || (State = {
-}));",
+    r#"export var State;
+(function (State) {
+    State["closed"] = "closed";
+    State["opened"] = "opened";
+    State["mounted"] = "mounted";
+    State["unmounted"] = "unmounted";
+})(State || (State = {}));
+"#,
     ok_if_code_eq
+);
+
+test!(
+    ::swc_ecma_parser::Syntax::Typescript(Default::default()),
+    |_| strip(),
+    issue_640,
+    "import { Handler } from 'aws-lambda';
+export const handler: Handler = async (event, context) => {};",
+    "export const handler = async (event, context) => {};",
+    ok_if_code_eq
+);
+
+test!(
+    ::swc_ecma_parser::Syntax::Typescript(Default::default()),
+    |_| strip(),
+    issue_656,
+    "export const x = { text: 'hello' } as const;",
+    "export const x = { text: 'hello' };",
+    ok_if_code_eq
+);
+
+to!(import_type, "import type foo from 'foo'", "");
+
+to!(export_type, "export type { foo }", "");
+
+to!(
+    issue_685,
+    "
+    type MyType = string;
+    export default MyType;",
+    ""
+);
+
+to!(
+    issue_685_2,
+    "
+    class MyType {}
+    type MyType = string;
+    export default MyType;",
+    "
+    class MyType {}
+    export default MyType;"
+);
+
+to!(
+    issue_685_3,
+    "
+    var MyType = function(){};
+    type MyType = string;
+    export default MyType;",
+    "
+    var MyType = function(){};
+    export default MyType;"
+);
+
+to!(
+    ts_enum_str_init,
+    "enum FlexSize {
+  md = 'md',
+  lg = 'lg',
+}",
+    "var FlexSize;
+(function (FlexSize) {
+    FlexSize['md'] = 'md';
+    FlexSize['lg'] = 'lg';
+})(FlexSize || (FlexSize = {}));
+"
+);
+
+to!(
+    ts_enum_no_init,
+    "enum FlexSize {
+  md,
+  lg,
+}",
+    "var FlexSize;
+(function (FlexSize) {
+    FlexSize[FlexSize['md'] = 0] = 'md';
+    FlexSize[FlexSize['lg'] = 1] = 'lg';
+})(FlexSize || (FlexSize = {}));
+"
 );

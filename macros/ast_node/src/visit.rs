@@ -1,19 +1,7 @@
-use darling::FromField;
-use pmutil::{smart_quote, Quote, ToTokensExt};
+use crate::fold::{normalize_type_for_bound, should_skip_field};
+use pmutil::{smart_quote, Quote};
 use swc_macros_common::prelude::*;
 use syn::*;
-
-#[derive(Debug, FromField)]
-#[darling(attributes(fold))]
-struct FieldAttrs {
-    ///
-    #[darling(default)]
-    pub ignore: bool,
-
-    /// Should we add bound for the field's type?
-    #[darling(default)]
-    pub bound: bool,
-}
 
 pub fn derive(input: DeriveInput) -> ItemImpl {
     let mut derive_generics = Derive::new(&input);
@@ -148,50 +136,4 @@ pub fn derive(input: DeriveInput) -> ItemImpl {
         ))
         .parse();
     derive_generics.append_to(item)
-}
-
-fn should_skip_field(field: &Field) -> bool {
-    let attrs = FieldAttrs::from_field(field).expect("#[derive(Fold)]: failed to parse attribute");
-    if attrs.ignore {
-        return true;
-    }
-
-    let ty_str = field.ty.dump().to_string();
-    match &*ty_str {
-        "bool" | "usize" | "u128" | "u64" | "u32" | "u16" | "u8" | "isize" | "i128" | "i64"
-        | "i32" | "i16" | "i8" | "f64" | "f32" | "String" => return true,
-        _ => {}
-    }
-
-    false
-}
-
-fn normalize_type_for_bound(ty: Type) -> Type {
-    use syn::fold::Fold;
-
-    struct Norm;
-    impl Fold for Norm {
-        fn fold_path(&mut self, path: Path) -> Path {
-            if path.segments.len() == 1 {
-                let seg = &path.segments[0];
-                if seg.ident != "Box" && seg.ident != "Option" && seg.ident != "Vec" {
-                    return path.clone();
-                }
-
-                if let PathArguments::AngleBracketed(ref args) = seg.arguments {
-                    if args.args.len() == 1 {
-                        if let GenericArgument::Type(ref ty) = *args.args.last().unwrap() {
-                            if let Type::Path(TypePath { ref path, .. }) = *ty {
-                                return self.fold_path(path.clone());
-                            }
-                        }
-                    }
-                }
-            }
-
-            fold::fold_path(self, path)
-        }
-    }
-
-    Norm.fold_type(ty)
 }

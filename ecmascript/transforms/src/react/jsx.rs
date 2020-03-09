@@ -115,6 +115,8 @@ struct Jsx {
     throw_if_namespace: bool,
 }
 
+noop_fold_type!(Jsx);
+
 impl Jsx {
     fn jsx_frag_to_expr(&mut self, el: JSXFragment) -> Expr {
         let span = el.span();
