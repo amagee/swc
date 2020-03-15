@@ -1,8 +1,6 @@
 #![feature(box_syntax, box_patterns)]
 
 
-use backtrace::Backtrace;
-
 pub use sourcemap;
 pub use swc_atoms as atoms;
 pub use swc_common as common;
@@ -87,12 +85,6 @@ impl Compiler {
         is_module: bool,
         parse_comments: bool,
     ) -> Result<Program, Error> {
-        println!("{:?}", syntax);
-
-        let bt = Backtrace::new();
-        // do_some_work();
-        println!("{:?}", bt);
-
         self.run(|| {
             let session = ParseSess {
                 handler: &self.handler,

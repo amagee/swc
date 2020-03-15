@@ -16,6 +16,8 @@ use swc_common::{iter::IdentifyLast, FileName, Fold, FoldWith, Spanned, DUMMY_SP
 use swc_ecma_ast::*;
 use swc_ecma_parser::{Parser, SourceFileInput, Syntax};
 use string_cache::Atom;
+use std::fs::File;
+use std::io::Read;
 
 #[cfg(test)]
 mod tests;
@@ -145,6 +147,31 @@ impl Jsx {
     fn jsx_elem_to_expr(&mut self, el: JSXElement) -> Expr {
         let span = el.span();
 
+        match el.opening.name.clone() {
+          JSXElementName::Ident(Ident {
+            sym: atom,
+            ..
+          }) => {
+            if atom == Atom::from("file") {
+              for attr in el.opening.attrs.clone() {
+                match attr.clone() {
+                  JSXAttrOrSpread::JSXAttr(JSXAttr { 
+                    name: JSXAttrName::Ident(Ident { sym: name_atom, .. }),
+                    value: Some(JSXAttrValue::Lit(Lit::Str(Str { value: value_atom, .. }))),
+                    ..
+                  }) => {
+                    if name_atom.to_string() == "path" {
+                      println!("Attr with name 'path' & value {:#?}", value_atom.to_string());
+                    }
+                  },
+                  _ => println!("Not an attr")
+                }
+              }
+            }
+          },
+          _ => println!("No surprise here")
+        }
+
         let name = self.jsx_name(el.opening.name);
 
         let mut args: Vec<ExprOrSpread> = iter::once(name.as_arg())
@@ -160,49 +187,77 @@ impl Jsx {
           })
           .collect();
 
-        match &mut args[1] {
-            ExprOrSpread { 
-                spread: _,
-                expr: box Expr::Object(
-                    ObjectLit {
-                        span: _,
-                        props: p
-                    }
-                )
-            } => {
-                println!("we matched");
+        match &args[0] {
+          ExprOrSpread { 
+            // Matches uppercase components ie. <File>
+            expr: box Expr::Ident(
+              Ident {
+                sym: component_name_atom, .. 
+              }
+            ),
 
-                p.push(
-                    PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
-                        key: PropName::Str(Str {
-                            span: DUMMY_SP,
-                            value: Atom::from("123"), //JSWordStaticSet"123".into()),
-                            has_escape: false,
-                        }),
-                        value: Box::new(Expr::Lit(
-                            Lit::Num(
-                                Number {
-                                    span: DUMMY_SP,
-                                    value: 3.0,
-                                },
-                            ),
-                        )),
-                    })))
-                )
-            },
-            _ => println!("we didn't match")
+            // Matches lowercase components ie. <div>
+//            expr: box Expr::Lit(
+//              Lit::Str(
+//                Str { 
+//                  value: component_name_atom, .. 
+//                }
+//              )
+//            ),
+            ..
+          } => {
+            if component_name_atom.to_string() == "File" {
+              match &mut args[1] {
+                  ExprOrSpread { 
+                      spread: _,
+                      expr: box Expr::Object(
+                          ObjectLit {
+                              span: _,
+                              props: p
+                          }
+                      )
+                  } => {
+                      for attr in p.clone() {
+                        match attr.clone() {
+                          PropOrSpread::Prop(box Prop::KeyValue(KeyValueProp {
+                              key: PropName::Ident(Ident { sym: name_atom, .. }),
+                              value: box Expr::Lit(Lit::Str(Str { value: value_atom, .. })),
+                          })) => {
+                            if name_atom.to_string() == "path" {
+                              let mut file = File::open(value_atom.to_string()).unwrap();
+                              let mut contents = String::new();
+                              file.read_to_string(&mut contents).unwrap();
+
+                              p.push(
+                                  PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
+                                      key: PropName::Str(Str {
+                                          span: DUMMY_SP,
+                                          value: Atom::from("fileContents"), //JSWordStaticSet"123".into()),
+                                          has_escape: false,
+                                      }),
+                                      value: Box::new(Expr::Lit(
+                                          Lit::Str(
+                                              Str {
+                                                  span: DUMMY_SP,
+                                                  value: Atom::from(contents),
+                                                  has_escape: false
+                                              },
+                                          ),
+                                      )),
+                                  })))
+                              );
+                            }
+                          },
+                          _ => { }
+                        }
+                      }
+                  },
+                  _ => { }
+              }
+            }
+          },
+          _ => { }
         }
-
-        args.push(ExprOrSpread {
-            spread: None,
-            //expr: Box::new(Expr::Lit(Lit::Null))
-            expr: Box::new(Expr::Lit(Lit::Bool(Bool {
-                span: DUMMY_SP,
-                value: true,
-            })))
-        });
-
-        println!("ARGS {:#?}", args);
 
         Expr::Call(CallExpr {
             span,
